@@ -1,6 +1,5 @@
-use std::{fs, path::PathBuf, sync::Arc};
+use std::{path::PathBuf, sync::Arc};
 
-use parking_lot::RwLock;
 use quick_xml::{Error, Reader};
 
 use crate::{serialiser, PersistXml, XmlElement};
