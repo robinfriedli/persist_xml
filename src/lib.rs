@@ -507,6 +507,7 @@ mod tests {
     use std::sync::Arc;
 
     use crate::{persist::context::Context, Builder, Node, XmlElement};
+    use std::ops::Deref;
 
     #[test]
     fn it_works() {
@@ -530,9 +531,14 @@ mod tests {
 
         fn print_children(elem: &Arc<dyn XmlElement>, level: usize) {
             let xml_element_data = elem.get_xml_element_data();
+            let node_data_lock = unsafe { &*elem.get_node_data().lock.get() }.deref();
+            let node_list_lock = xml_element_data.children.lock.deref();
             let tag_name = &xml_element_data.tag_name;
             let padding = String::from(" ").repeat(level * 2);
-            eprintln!("{}<{}>", padding, tag_name);
+            eprintln!(
+                "{}<{}>; NodeData lock {:p}, NodeList lock {:p}",
+                padding, tag_name, node_data_lock, node_list_lock
+            );
 
             for child in xml_element_data.children.iter() {
                 match child {
