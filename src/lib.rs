@@ -308,22 +308,41 @@ impl NodeData {
         &mut *self.inner.get()
     }
 
-    /// SAFETY:
-    /// It is only safe to call this function while holding write access to the current main lock.
-    /// This function acquires the `lock_swap_protection` lock to ensure that no other threads
-    /// are trying to dereference the cell which contains the main lock but this function still
-    /// requires the caller to have write access to the main lock because otherwise there might
-    /// be threads using the current lock. This does not cause a deadlock since write access to
-    /// the `lock_swap_protection` lock is only acquired here while holding write access to the main
-    /// lock and read access to the `lock_swap_protection` lock is only acquired by the
-    /// `acquire_read_lock` and `acquire_write_lock` functions, where the `lock_swap_protection` lock
-    /// is released before acquiring the main lock, so readers never hold both locks at the same time
-    /// and no other writers exist. The important thing is that no thread tries to acquire the main
-    /// lock while still holding the `lock_swap_protection` lock.
-    pub(crate) unsafe fn swap_locks(&self, new_lock: Arc<RwLock<()>>) {
-        let _guard = self.lock_swap_protection.write();
-        let lock = &mut *self.lock.get();
+    /// Swaps the current main lock of this NodeData for the provided lock. First acquires write access
+    /// to the `lock_swap_protection` lock to safely get a mutable reference to the current lock, then
+    /// acquires write access to the current lock to wait for current readers of the lock to finish before
+    /// swapping the lock for the provided lock. Then acquires and returns write access to the new lock.
+    /// This function holds two locks at the same time (`lock_swap_protection` and the current lock,
+    /// then `lock_swap_protection` and the new lock) but guarantees to not cause any deadlocks since
+    /// this function is the only place where these locks overlap and no thread tries to acquire the
+    /// `lock_swap_protection` lock while holding the main lock of a NodeData.
+    ///
+    /// This function is used when a Node is inserted to or removed from a NodeList to adopt or remove
+    /// the lock of the NodeList.
+    ///
+    /// The contract for this function is that the caller does not already hold the lock for this NodeData.
+    pub(crate) fn swap_and_acquire_lock(
+        &self,
+        new_lock: Arc<RwLock<()>>,
+    ) -> RwLockWriteGuard<'_, ()> {
+        let _swap_protection_guard = self.lock_swap_protection.write();
+        // SAFETY:
+        // Exclusive access to the lock is safe because the current thread holds write access to the
+        // `lock_swap_protection` lock.
+        let lock = unsafe { &mut *self.lock.get() };
+        let curr_lock = Arc::clone(lock);
+        // no deadlock: the current owner of the lock is not waiting for access to the `lock_swap_protection`
+        // lock because in the only place where the locks overlap (this function) the `lock_swap_protection`
+        // lock is always acquired first.
+        let curr_lock_guard = curr_lock.write();
+        // The current thread acquires write access to the current lock to assure that all readers using the lock
+        // are done before swapping the locks.
         *lock = new_lock;
+        drop(curr_lock_guard);
+
+        // no deadlock: the only other lock currently held is still the `lock_swap_protection` lock as
+        // the previous lock has been released, so the same argument applies.
+        lock.write()
     }
 
     pub(crate) fn acquire_read_lock(&self) -> RwLockReadGuard<'_, ()> {

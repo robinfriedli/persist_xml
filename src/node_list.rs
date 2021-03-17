@@ -106,10 +106,10 @@ impl NodeList {
 
     pub fn link_first(&self, node: Node) {
         let node_data = node.get_node_data();
-        let _guard = self.set_and_acquire_lock(&node_data);
+        let _guard = node_data.swap_and_acquire_lock(self.lock.clone());
         // SAFETY:
         // The lock of the provided Node has been set to the lock of this NodeList
-        // using `set_and_acquire_lock()` and the write lock has been acquired.
+        // using `NodeData::swap_and_acquire_lock()` and the write lock has been acquired.
         let node_data = unsafe { node_data.force_write() };
 
         // SAFETY:
@@ -142,10 +142,10 @@ impl NodeList {
 
     pub fn link_last(&self, node: Node) {
         let node_data = node.get_node_data();
-        let _guard = self.set_and_acquire_lock(&node_data);
+        let _guard = node_data.swap_and_acquire_lock(self.lock.clone());
         // SAFETY:
         // The lock of the provided Node has been set to the lock of this NodeList
-        // using `set_and_acquire_lock()` and the write lock has been acquired.
+        // using `NodeData::swap_and_acquire_lock()` and the write lock has been acquired.
         let node_data = unsafe { node_data.force_write() };
 
         // SAFETY:
@@ -190,7 +190,7 @@ impl NodeList {
         &'a mut NodeDataInner,
     ) {
         let node_data = node.get_node_data();
-        let guard = self.set_and_acquire_lock(&node_data);
+        let guard = node_data.swap_and_acquire_lock(self.lock.clone());
         let other_node_data = other_node.get_node_data();
         self.check_current(&other_node_data);
 
@@ -200,41 +200,6 @@ impl NodeList {
         let node_data = unsafe { node_data.force_write() };
         let other_node_data = unsafe { other_node_data.force_write() };
         (guard, node_data, other_node_data)
-    }
-
-    /// Sets the lock of this NodeList as the lock of the provided Node and acquires the write lock.
-    /// This acquires write access to the Node's current lock first and then sets
-    /// this NodeList's lock as the Node's lock. Then, it acquires write access to
-    /// the Node's current lock, which is now expected to be the lock of this NodeList,
-    /// and returns the acquired `RwLockWriteGuard`. However, this expectation might
-    /// fail if the Node was inserted to a different NodeList at the same time and the
-    /// other thread managed to acquire the lock placed by this thread first and swapped
-    /// the lock for a different NodeList, in which case the process has to be retried.
-    /// In practice this should not occur as adding / removing a Node to / from a NodeList
-    /// requires a transaction and concurrently running multiple transactions for the
-    /// same context is not allowed by default as transactions normally are synchronised
-    /// unless the user chooses a different synchronisation mode. Additionally, adding
-    /// a Node to two different NodeLists without removing it from the other one first
-    /// is never allowed.
-    fn set_and_acquire_lock<'a>(&self, node_data: &'a NodeData) -> RwLockWriteGuard<'a, ()> {
-        loop {
-            let node_guard = node_data.acquire_write_lock();
-            // SAFETY:
-            // Swapping locks is safe because write access to the current lock has been acquired
-            unsafe { node_data.swap_locks(self.lock.clone()) };
-            drop(node_guard);
-
-            let guard = node_data.acquire_write_lock();
-            // SAFETY:
-            // A mutable reference to the lock is only given out in `NodeData::swap_locks()`,
-            // which can only safely be called when holding the write lock of the current lock
-            // and since the write lock is held by the current thread it is safe to get a
-            // reference to the lock.
-            let curr_lock = unsafe { &*node_data.lock.get() };
-            if Arc::ptr_eq(&self.lock, curr_lock) {
-                return guard;
-            }
-        }
     }
 
     /// Verify that the node is part of this NodeList by asserting that
