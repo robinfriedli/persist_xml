@@ -314,8 +314,8 @@ impl NodeData {
     /// swapping the lock for the provided lock. Then acquires and returns write access to the new lock.
     /// This function holds two locks at the same time (`lock_swap_protection` and the current lock,
     /// then `lock_swap_protection` and the new lock) but guarantees to not cause any deadlocks since
-    /// this function is the only place where these locks overlap and no thread tries to acquire the
-    /// `lock_swap_protection` lock while holding the main lock of a NodeData.
+    /// this function and `acquire_lock()` are the only places where these locks overlap and no thread
+    /// tries to acquire the `lock_swap_protection` lock while holding the main lock of a NodeData.
     ///
     /// This function is used when a Node is inserted to or removed from a NodeList to adopt or remove
     /// the lock of the NodeList.
@@ -332,8 +332,8 @@ impl NodeData {
         let lock = unsafe { &mut *self.lock.get() };
         let curr_lock = Arc::clone(lock);
         // no deadlock: the current owner of the lock is not waiting for access to the `lock_swap_protection`
-        // lock because in the only place where the locks overlap (this function) the `lock_swap_protection`
-        // lock is always acquired first.
+        // lock because in the only places where the locks overlap (this function and `acquire_lock()`) the
+        // `lock_swap_protection` lock is always acquired first.
         let curr_lock_guard = curr_lock.write();
         // The current thread acquires write access to the current lock to assure that all readers using the lock
         // are done before swapping the locks.
@@ -353,46 +353,22 @@ impl NodeData {
         self.acquire_lock(RwLock::write)
     }
 
+    /// Acquire the main lock of this `NodeData` to gain access to the inner NodeData.
+    /// This first acquires read access to the `lock_swap_protection` to make sure that no other thread
+    /// may swap the main lock in the meantime. The `lock_swap_protection` lock is released when this
+    /// function goes out of scope and the guard (read or write) for the main lock is returned to the caller.
+    /// Since swapping the main lock in `swap_and_acquire_lock` acquires both the `lock_swap_protection` lock
+    /// and the current main lock, the main lock is guaranteed not to be swapped while the caller holds the
+    /// guard.
     fn acquire_lock<'a, T: 'a>(&self, lock_supplier: fn(&'a RwLock<()>) -> T) -> T {
-        let lock_swap_guard = self.lock_swap_protection.read();
+        let _swap_protection_guard = self.lock_swap_protection.read();
         // SAFETY:
         // Acquiring a shared reference to the main lock is safe because the current thread has read access
         // to the `lock_swap_protection` lock and an exclusive reference to the lock is only given out
-        // in `swap_locks` while holding write access to the `lock_swap_protection` lock, so the lock
+        // in `swap_and_acquire_lock` while holding write access to the `lock_swap_protection` lock, so the lock
         // ensures there can never be a reader while there is a writer thus Rust's reference rules are met.
-        let mut lock = unsafe { &*self.lock.get() };
-        // Clone the Arc that holds the main lock to ensure that it is not deallocated by any writers after
-        // the `lock_swap_guard` is released and before this thread acquires read access to the main lock.
-        let mut _pinned_lock = Arc::clone(lock);
-        // Release the `lock_swap_protection` lock because the lock cannot overlap with the main lock to
-        // avoid deadlocks with writers, see `swap_locks()`.
-        drop(lock_swap_guard);
-
-        loop {
-            let guard = lock_supplier(lock);
-
-            // There is no guarantee that a writer didn't manage to acquire the main lock after this thread
-            // released the `lock_swap_protection` lock and before this thread managed to acquire read access
-            // to the main lock, so now that the lock has been acquired it has to be checked that the lock is
-            // still the current main lock, else the process has to be retried.
-            let lock_swap_guard = self.lock_swap_protection.read();
-            // SAFETY:
-            // Dereferencing main lock is safe because the current thread holds read access to the
-            // `lock_swap_protection`.
-            let rechecked_lock = unsafe { &*self.lock.get() };
-
-            // lock may have been swapped by the previous holder of the lock
-            if Arc::ptr_eq(lock, rechecked_lock) {
-                return guard;
-            } else {
-                // retry acquiring the new lock
-                lock = rechecked_lock;
-                // keep a clone of the lock to make sure it is not dropped by any writers that may swap locks
-                // after releasing the `lock_swap_protection` lock.
-                _pinned_lock = Arc::clone(lock);
-                drop(lock_swap_guard);
-            }
-        }
+        let lock = unsafe { &*self.lock.get() };
+        lock_supplier(lock)
     }
 }
 
